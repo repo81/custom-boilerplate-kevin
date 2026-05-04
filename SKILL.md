@@ -294,10 +294,15 @@ STRIPE_PRODUCT_PRO=prod_<id>
 # Price IDs — create under each product
 STRIPE_PRICE_PRO_YEARLY=price_<id>
 
+# ── Email (Resend) ──────────────────────────────────────
+# Get from: https://resend.com/api-keys
+# Used for Supabase SMTP — configure in Supabase → Project Settings → Auth → SMTP Settings
+# Host: smtp.resend.com | Port: 465 | Username: resend | Password: <api-key>
+RESEND_API_KEY=re_<key>
+
 # ── App ─────────────────────────────────────────────────
 APP_NAME=Your App Name
 NEXT_PUBLIC_APP_NAME=Your App Name
-NEXT_PUBLIC_SITE_URL=http://localhost:3000
 ```
 
 ---
@@ -341,6 +346,46 @@ export function createClient() {
   )
 }
 ```
+
+**`app/actions/auth.ts`** — magic-link sign-in and sign-out:
+```ts
+'use server'
+
+import { headers } from 'next/headers'
+import { redirect } from 'next/navigation'
+import { createClient } from '@/lib/supabase/server'
+
+export async function signInWithOtp(formData: FormData) {
+  const email = formData.get('email') as string
+  const headersList = await headers()
+  const host = headersList.get('host') ?? ''
+  const proto = headersList.get('x-forwarded-proto') ?? 'https'
+  const origin = `${proto}://${host}`
+
+  const supabase = await createClient()
+
+  const { error } = await supabase.auth.signInWithOtp({
+    email,
+    options: {
+      emailRedirectTo: `${origin}/auth/callback`,
+    },
+  })
+
+  if (error) {
+    return redirect(`/auth/login?error=${encodeURIComponent(error.message)}`)
+  }
+
+  return redirect('/auth/login?message=Check your email for a magic link')
+}
+
+export async function signOut() {
+  const supabase = await createClient()
+  await supabase.auth.signOut()
+  redirect('/')
+}
+```
+
+> **Why `headers()` instead of `NEXT_PUBLIC_SITE_URL`:** `NEXT_PUBLIC_` vars are inlined at build time. If the env var isn't set when the build runs, the value is `undefined` and Supabase silently falls back to the site root — sending the magic link code to `/?code=...` instead of `/auth/callback`. Using `headers()` derives the origin from the live request, so it always matches and works across production, preview, and local.
 
 **`lib/supabase/middleware.ts`** — middleware only:
 ```ts
@@ -564,6 +609,8 @@ Without it, no events reach `localhost:3000/api/webhooks/stripe` and the tier wi
 | `new Stripe()` at module scope | Breaks build when env vars absent — use lazy init (Step 9) |
 | Supabase admin client at module scope | Same issue — create inside the handler function |
 | Dynamic Tailwind classes purged in production | Add them to `safelist` in `tailwind.config.ts` |
+| Magic link lands at `/?code=` instead of `/auth/callback` | `NEXT_PUBLIC_` vars are inlined at build time — if missing during build, `emailRedirectTo` becomes `"undefined/auth/callback"` and Supabase falls back to the site root. Use `headers()` to derive origin dynamically (see `app/actions/auth.ts` in Step 7). Never use `NEXT_PUBLIC_SITE_URL` for the auth redirect. |
+| Supabase OTP rate limit blocks debugging | Free tier caps at ~3 emails/hour. Configure Resend SMTP in Supabase → Project Settings → Auth → SMTP Settings (see Step 6 for credentials). |
 
 ---
 
@@ -607,8 +654,10 @@ vercel env add STRIPE_WEBHOOK_SECRET production
 vercel env add STRIPE_PRODUCT_PRO production
 vercel env add STRIPE_PRICE_PRO_MONTHLY production
 vercel env add STRIPE_PRICE_PRO_YEARLY production
-vercel env add NEXT_PUBLIC_SITE_URL production
+vercel env add RESEND_API_KEY production
 ```
+
+> **Do not add `NEXT_PUBLIC_SITE_URL`.** The auth action derives the origin from request headers at runtime — no env var needed (see Step 7 and Step 11 gotchas).
 
 ---
 
